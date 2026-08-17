@@ -11,10 +11,11 @@ from fastapi  import APIRouter,  Depends
 import redis.asyncio as redis
 from ..helper import get_redis
 from .schema import SanitizerRequest, SanitizerResponse
+from .sanitizer import SanitizerService
 
-router = APIRouter(prefix="/v1",tags="Ingress Governance")
+router = APIRouter(prefix="/v1")
 
-router.post("/sanitize", response_model=SanitizerResponse, status_code=200)
+@router.post("/sanitize", response_model=SanitizerResponse, status_code=200)
 async def sanitize_endpoint(payload: SanitizerRequest, redis_client:redis.Redis = Depends(get_redis)):
     service = SanitizerService(redis_client)
     result = await service.sanitize_and_store(payload.prompt)

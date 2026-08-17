@@ -16,12 +16,22 @@ class DummyNlpEngine(NlpEngine):
 
     def process_text(self, text, language):
         tokens = text.split()
-            return NlpArtifacts(
-                tokens=tokens,
-                lemmas=tokens,
-                tokens_indices=[(text.find(t), text.find(t) + len(t)) for t in tokens],
-                entities=[],
-                language=language
+
+        # Calculate start offsets for each token
+        tokens_indices = []
+        curr_idx = 0
+        for token in tokens:
+            start = text.find(token, curr_idx)
+            tokens_indices.append(start) 
+            curr_idx = start + len(token)
+        
+        return NlpArtifacts(
+            entities=[],
+            tokens=tokens,
+            tokens_indices=tokens_indices,
+            lemmas=tokens,
+            language=language,
+            nlp_engine=self # Context enhancers rely on this field when confidence score is low. 
             )
 
     def process_batch(self, texts, language):
