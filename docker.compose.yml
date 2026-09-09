@@ -1,0 +1,21 @@
+services:
+  redis:
+    image: redis/redis-stack:latest
+    ports:
+      - "6379:6379"
+      - "8001:8001" # RedisInsight UI (helpful for visual inspection)
+  
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: shadow_ai_postgres
+    environment:
+      POSTGRES_USER: shadow_user
+      POSTGRES_PASSWORD: shadow_password
+      POSTGRES_DB: shadow_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
