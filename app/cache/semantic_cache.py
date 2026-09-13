@@ -1,7 +1,8 @@
 import redis.asyncio as redis
 from redis.commands.search.field import VectorField, TextField
-from redis.commands.search.indexDefinition import IndexDefinition, IndexType
+from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
+import uuid 
 
 INDEX_NAME = "idx:semantic_cache"
 DOC_PREFIX = "cache:"
@@ -59,7 +60,7 @@ class SemanticCacheService:
             if results.docs:
                 nearest = results.docs[0]
                 distance = float(nearest.vector_distance)
-
+                print(f"nearest distance found: {distance:.2f}")
                 # Cosine distance: lower is closer. 0.08 = 92% match
                 if distance <= threshold:
                     return nearest.masked_response
