@@ -39,7 +39,7 @@ async def run_test():
     print("[5] Testing Unrelated Query Miss (Cosine Distance > 0.08)...")
     prompt_unrelated = "What is the capital of France?"
     u_bytes, _ = await embedder.get_embeddings(prompt_unrelated)
-    miss_result = await cache.check_cache(u_bytes)
+    miss_result = await cache.check_cache(u_bytes,threshold=0.28)
     assert miss_result is None, f"Expected None on miss, got: {miss_result}"
     print("  -> PASS: Unrelated query correctly triggered Cache Miss.")
 
