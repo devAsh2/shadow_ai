@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
@@ -11,10 +12,12 @@ SYSTEM_PROMPT = (
     "Do NOT alter, remove, or try to decode these placeholders. Always refer to them as given."
 )
 
+load_dotenv()  # Load environment variables from .env file
+
 def get_llm():
     # Reads GROQ_API_KEY from environment
     return ChatGroq(
-        model_name="llama-3.3-70b-versatile",
+        model_name="openai/gpt-oss-120b",
         temperature=0.2,
     )
 

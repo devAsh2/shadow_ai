@@ -3,11 +3,14 @@
 # Masks sensitive information, generates a unique session key, and stores the mapping in Redis with a 60-second TTL
 import secrets
 import json
+import logging
 import redis.asyncio as redis
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from app.ingress.custom_nlp import DummyNlpEngine
+
+logger = logging.getLogger(__name__)
 
 class SanitizerService:
 
@@ -31,7 +34,7 @@ class SanitizerService:
         phone_pattern = Pattern("phone_regex", r"(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", 0.4)
         phone_context = [
             "phone", "call", "mobile", "cell", "contact", 
-            "tel", "dial", "whatsapp", "reach"
+            "tel", "dial", "whatsapp", "reach","text","texted","sms"
         ]
         self.analyzer.registry.add_recognizer(
             PatternRecognizer(supported_entity="PHONE_NUMBER", patterns=[phone_pattern], context=phone_context)
@@ -88,7 +91,12 @@ class SanitizerService:
         
         anonymized_result = self.anonymizer.anonymize(text=prompt, analyzer_results=ltr_results, operators=operators)
         masked_prompt = anonymized_result.text
-
+        logger.info(
+            "PII masking complete session=%s has_pii=%s masked_prompt=%s",
+            session_key,
+            bool(reverse_map),
+            masked_prompt,
+        )
         # store the reverse map in redis for easy lookups with 60 secs ttl
         if reverse_map:
             redis_key = f"rev_map_session:{session_key}"

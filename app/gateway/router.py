@@ -52,18 +52,17 @@ async def query_gateway(
     proxy_service: ProxyService = Depends(get_proxy_service),
 ):
     result = await proxy_service.handle_prompt(request.prompt)
-    
-    # If hit in cache (Redis or Postgres), return masked answer directly
+    # Cache and agent responses are restored before they reach the client.
     if result["source"] in ("redis_cache", "postgres_cache"):
         return QueryResponse(
             source=result["source"],
-            response=result["masked_response"],
+            response=result["response"],
             session_key=result["session_key"],
         )
     
-    # If miss, return placeholder until LangGraph agent is wired
+    # Return the de-anonymized agent response after a cache miss.
     return QueryResponse(
-        source="miss",
-        response="[Cache Miss] Will forward to LangGraph agent engine.",
+        source=result["source"],
+        response=result["response"],
         session_key=result["session_key"],
     )

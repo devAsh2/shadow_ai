@@ -1,14 +1,17 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 import redis.asyncio as redis
-
+import logging
 from app.cache.semantic_cache import SemanticCacheService
 from app.cache.pg_cache import PostgresCacheService
 from app.ingress.router import router as ingress_router
 from app.gateway.router import router as gateway_router  
 
-redis_client = redis.Redis(host="localhost", port=6379, decode_responses=False)
+redis_client = redis.Redis(host="localhost", port=6380, decode_responses=False)
 cache_service = SemanticCacheService(redis_client=redis_client)
+
+logging.basicConfig(level=logging.INFO)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

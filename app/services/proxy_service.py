@@ -1,13 +1,15 @@
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-
+import asyncio
 from app.ingress.sanitizer import SanitizerService
 from app.cache.createEmbedding import EmbeddingService
 from app.cache.semantic_cache import SemanticCacheService
 from app.cache.pg_cache import PostgresCacheService
 from app.agent.graph import agent_graph
 from app.egress.de_anonymizer import DeAnonymizerService
+import logging
 
+logger = logging.getLogger(__name__)
 
 class ProxyService:
     def __init__(
@@ -36,15 +38,17 @@ class ProxyService:
         # 3. Tier 1: Check Redis RAM Cache (Sub-20ms lookup)
         cached_response = await self.redis_cache.check_cache(vector_bytes)
         if cached_response:
+            logger.info("Proxy response source=redis_cache session=%s", session_key)
             return {
                 "source": "redis_cache",
-                "masked_response": cached_response,
+                "response": await self.de_anonymizer.restore(cached_response, session_key),
                 "session_key": session_key,
             }
 
         # 4. Tier 2: Check Postgres pgvector Cache (Long-term persistent store)
         cached_response = await self.pg_cache.check_cache(vector_list)
         if cached_response:
+            logger.info("Proxy response source=postgres_cache session=%s", session_key)
             # Cache Warming: Write back to Redis with TTL so subsequent calls hit Tier 1
             await self.redis_cache.set_cache(
                 masked_prompt=masked_prompt,
@@ -54,7 +58,7 @@ class ProxyService:
             )
             return {
                 "source": "postgres_cache",
-                "masked_response": cached_response,
+                "response": await self.de_anonymizer.restore(cached_response, session_key),
                 "session_key": session_key,
             }
 
@@ -68,6 +72,7 @@ class ProxyService:
         
         agent_result = await agent_graph.ainvoke(initial_state)
         masked_response = agent_result["final_response"]
+        logger.info("Proxy response source=agent_engine session=%s", session_key)
 
         # 6. Asynchronous Write-Back (Store in Redis & Postgres simultaneously)
         await asyncio.gather(
