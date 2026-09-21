@@ -26,19 +26,82 @@ class ProxyService:
         self.pg_cache = pg_cache
         self.de_anonymizer = de_anonymizer
 
-    async def handle_prompt(self, raw_prompt: str) -> dict:
+    async def handle_prompt(
+        self,
+        raw_prompt: str,
+        session_key: str,
+        langfuse_callback=None,
+        trace=None,
+    ) -> dict:
+        trace_session_key = session_key
+
         # 1. Ingress Sanitizer: Mask PII and store reverse mapping in Redis
-        sanitized_data = await self.sanitizer.sanitize_and_store(raw_prompt)
+        sanitizer_span = trace.span(
+            name="ingress_sanitizer",
+            metadata={"session_key": trace_session_key},
+        ) if trace else None
+        try:
+            sanitized_data = await self.sanitizer.sanitize_and_store(raw_prompt)
+        except Exception as exc:
+            if sanitizer_span:
+                sanitizer_span.update(status_message=str(exc), level="ERROR")
+            raise
+
         masked_prompt = sanitized_data["masked_prompt"]
         session_key = sanitized_data["session_key"]
+        if sanitizer_span:
+            sanitizer_span.update(
+                output={"masked_prompt": masked_prompt},
+                metadata={
+                    "session_key": session_key,
+                    "has_pii": sanitized_data["has_pii"],
+                },
+            )
+        if trace:
+            trace.update(metadata={"session_key": session_key})
 
         # 2. Embedding Service: Generate vector representation (Single Model Execution)
-        vector_bytes, vector_list = await self.embedding_service.get_embeddings(masked_prompt)
+        embedding_span = trace.span(
+            name="embedding_generation",
+            input={"masked_prompt": masked_prompt},
+            metadata={"session_key": session_key},
+        ) if trace else None
+        try:
+            vector_bytes, vector_list = await self.embedding_service.get_embeddings(masked_prompt)
+        except Exception as exc:
+            if embedding_span:
+                embedding_span.update(status_message=str(exc), level="ERROR")
+            raise
+        if embedding_span:
+            embedding_span.update(
+                output={"embedding_dimensions": len(vector_list)},
+                metadata={"session_key": session_key},
+            )
 
         # 3. Tier 1: Check Redis RAM Cache (Sub-20ms lookup)
-        cached_response = await self.redis_cache.check_cache(vector_bytes)
+        redis_span = trace.span(
+            name="redis_cache_lookup",
+            input={"embedding_dimensions": len(vector_list)},
+            metadata={"session_key": session_key},
+        ) if trace else None
+        try:
+            cached_response = await self.redis_cache.check_cache(vector_bytes)
+        except Exception as exc:
+            if redis_span:
+                redis_span.update(status_message=str(exc), level="ERROR")
+            raise
+        if redis_span:
+            redis_span.update(
+                output={"cache_hit": bool(cached_response)},
+                metadata={"session_key": session_key},
+            )
         if cached_response:
             logger.info("Proxy response source=redis_cache session=%s", session_key)
+            if trace:
+                trace.update(
+                    output={"source": "redis_cache"},
+                    metadata={"session_key": session_key, "cache_hit": True},
+                )
             return {
                 "source": "redis_cache",
                 "response": await self.de_anonymizer.restore(cached_response, session_key),
@@ -46,7 +109,22 @@ class ProxyService:
             }
 
         # 4. Tier 2: Check Postgres pgvector Cache (Long-term persistent store)
-        cached_response = await self.pg_cache.check_cache(vector_list)
+        postgres_span = trace.span(
+            name="postgres_cache_lookup",
+            input={"embedding_dimensions": len(vector_list)},
+            metadata={"session_key": session_key},
+        ) if trace else None
+        try:
+            cached_response = await self.pg_cache.check_cache(vector_list)
+        except Exception as exc:
+            if postgres_span:
+                postgres_span.update(status_message=str(exc), level="ERROR")
+            raise
+        if postgres_span:
+            postgres_span.update(
+                output={"cache_hit": bool(cached_response)},
+                metadata={"session_key": session_key},
+            )
         if cached_response:
             logger.info("Proxy response source=postgres_cache session=%s", session_key)
             # Cache Warming: Write back to Redis with TTL so subsequent calls hit Tier 1
@@ -56,6 +134,11 @@ class ProxyService:
                 query_vector=vector_bytes,
                 ttl=86400,
             )
+            if trace:
+                trace.update(
+                    output={"source": "postgres_cache"},
+                    metadata={"session_key": session_key, "cache_hit": True},
+                )
             return {
                 "source": "postgres_cache",
                 "response": await self.de_anonymizer.restore(cached_response, session_key),
@@ -69,27 +152,68 @@ class ProxyService:
             "messages": [],
             "final_response": "",
         }
-        
-        agent_result = await agent_graph.ainvoke(initial_state)
+
+        agent_span = trace.span(
+            name="agent_engine",
+            input={"masked_prompt": masked_prompt},
+            metadata={"session_key": session_key},
+        ) if trace else None
+        try:
+            agent_config = {
+                "metadata": {"session_key": session_key},
+                "configurable": {"session_key": session_key},
+            }
+            if langfuse_callback:
+                agent_config["callbacks"] = [langfuse_callback]
+            agent_result = await agent_graph.ainvoke(initial_state, config=agent_config)
+        except Exception as exc:
+            if agent_span:
+                agent_span.update(status_message=str(exc), level="ERROR")
+            raise
         masked_response = agent_result["final_response"]
+        if agent_span:
+            agent_span.update(
+                output={"masked_response": masked_response},
+                metadata={"session_key": session_key},
+            )
         logger.info("Proxy response source=agent_engine session=%s", session_key)
 
         # 6. Asynchronous Write-Back (Store in Redis & Postgres simultaneously)
-        await asyncio.gather(
-            self.redis_cache.set_cache(
-                masked_prompt=masked_prompt,
-                masked_response=masked_response,
-                query_vector=vector_bytes,
-                ttl=86400,
-            ),
-            self.pg_cache.set_cache(
-                masked_prompt=masked_prompt,
-                masked_response=masked_response,
-                embedding=vector_list,
-            ),
-        )
+        writeback_span = trace.span(
+            name="cache_writeback",
+            input={"masked_prompt": masked_prompt},
+            metadata={"session_key": session_key},
+        ) if trace else None
+        try:
+            await asyncio.gather(
+                self.redis_cache.set_cache(
+                    masked_prompt=masked_prompt,
+                    masked_response=masked_response,
+                    query_vector=vector_bytes,
+                    ttl=86400,
+                ),
+                self.pg_cache.set_cache(
+                    masked_prompt=masked_prompt,
+                    masked_response=masked_response,
+                    embedding=vector_list,
+                ),
+            )
+        except Exception as exc:
+            if writeback_span:
+                writeback_span.update(status_message=str(exc), level="ERROR")
+            raise
+        if writeback_span:
+            writeback_span.update(
+                output={"redis": True, "postgres": True},
+                metadata={"session_key": session_key},
+            )
 
-        final_text = await self.de_anonymizer.restore(masked_response,session_key)
+        final_text = await self.de_anonymizer.restore(masked_response, session_key)
+        if trace:
+            trace.update(
+                output={"source": "agent_engine"},
+                metadata={"session_key": session_key, "cache_hit": False},
+            )
 
         return {
             "source": "agent_engine",

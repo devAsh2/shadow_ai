@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as redis
-
+import uuid
 from app.core.database import get_db_session
 from app.ingress.sanitizer import SanitizerService
 from app.cache.createEmbedding import EmbeddingService
@@ -10,6 +10,7 @@ from app.cache.semantic_cache import SemanticCacheService
 from app.cache.pg_cache import PostgresCacheService
 from app.services.proxy_service import ProxyService
 from app.egress.de_anonymizer import DeAnonymizerService
+from app.core.observability import langfuse_client, get_langfuse_callback
 
 router = APIRouter(prefix="/gateway", tags=["Gateway Core"])
 
@@ -51,18 +52,46 @@ async def query_gateway(
     request: QueryRequest,
     proxy_service: ProxyService = Depends(get_proxy_service),
 ):
-    result = await proxy_service.handle_prompt(request.prompt)
-    # Cache and agent responses are restored before they reach the client.
-    if result["source"] in ("redis_cache", "postgres_cache"):
+    session_key = f"sess_{uuid.uuid4().hex[:12]}"
+
+    # 1. Initialize root trace (Record session_key, keep raw PII out of top-level tags)
+    trace = langfuse_client.trace(
+        id=session_key,
+        name="gateway_query",
+        tags=["production"],
+        metadata={"client": "api_gateway"}
+    )
+
+    # 2. Get callback handler to pass to LangGraph inside ProxyService
+    langfuse_cb = get_langfuse_callback(trace_id=session_key)
+
+    try:
+        # 3. Delegate to ProxyService, passing session_key and tracer callback
+        result = await proxy_service.handle_prompt(
+            raw_prompt=request.prompt,
+            session_key=session_key,
+            langfuse_callback=langfuse_cb,
+            trace=trace,
+        )
+
+        # 4. Finalize trace details
+        trace.update(
+            output=result.get("masked_response", "cached_or_completed"),
+            metadata={
+                "source": result["source"],
+                "cache_hit": result["source"] in ("redis_cache", "postgres_cache"),
+            }
+        )
+
         return QueryResponse(
             source=result["source"],
             response=result["response"],
             session_key=result["session_key"],
         )
-    
-    # Return the de-anonymized agent response after a cache miss.
-    return QueryResponse(
-        source=result["source"],
-        response=result["response"],
-        session_key=result["session_key"],
-    )
+
+    except Exception as e:
+        trace.update(status_message=str(e), level="ERROR")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Flushes traces asynchronously without blocking
+        langfuse_client.flush()
